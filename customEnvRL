@@ -1,0 +1,302 @@
+from collections import deque, namedtuple
+from ast import literal_eval
+import json
+from mimetypes import init
+import random
+import numpy as np
+import gym
+from gym import spaces
+import stable_baselines3
+from stable_baselines3.common.env_checker import check_env
+from stable_baselines3 import A2C
+from unityagents import UnityEnvironment
+
+import json
+import requests
+import mysql.connector
+from mysql.connector import Error
+from kafka import KafkaConsumer
+
+
+
+
+# env = gym.make("CartPole-v1")
+# observation, info = env.reset(seed=42, return_info=True)
+
+#for _ in range(1000):
+    #action = env.action_space.sample()
+    #observation, reward, done, info = env.step(action)
+
+    #if done:
+        #observation, info = env.reset(return_info=True)
+        #print(observation,info)
+#env.close()
+
+class KafkaClient(object):
+
+    def __init__(self):
+        self.env = CustomEnv()
+        self.connector = Connector()
+        self.model = A2C('MlpPolicy',self.env)
+
+
+    def consume_msg(self):
+        consumer = KafkaConsumer(
+            'fetchSignal',
+            bootstrap_servers=':9092',
+            group_id='test'
+        )
+        
+        #self.connector.edge_update(self.model)
+        for message in consumer:
+            print(message.value)
+            ## parse message 
+
+            ## predict action given environment
+
+            ## 
+
+    def train_and_update(self):
+        self.model = A2C('MlpPolicy',self.env).learn(total_timesteps=5)
+        self.connector.edge_update(self.model)
+
+
+# class CustomModel(stable_baselines3):
+
+#     def __init__(self):
+#         super.__init__()
+
+class Connector():
+    def __init__(self):
+        self.db_domain = 'raas-data.c9q9qv3ngmbu.us-east-2.rds.amazonaws.com:3306'
+        self.db_cred = 'gK?7Rrg-5hHtS?s12'
+        self.robot_edge = 'http://127.0.0.1:8081/connect'
+    
+    def db_fetch(self,batchId):
+        try:
+            connection = mysql.connector.connect(host=self.db_domain,
+                                                 database='raas-db',
+                                                 user='admin',
+                                                 password=self.db_cred)
+
+            if connection.is_connected():
+                cursor = connection.cursor()
+                query = """SELECT *  FROM TABLE WHERE batch={}"""
+                query.format(batchId)
+                cursor.execute(query)
+                result = cursor.fetchall()
+                
+        
+        except Error as e:
+            print("connection error",e)
+
+
+    def edge_update(self,model):
+        policy = open('saved_model.zip','rb')
+        json_dict = {"steps": 10}
+        response = requests.post(self.robot_edge,files={"json": (None,json.dumps(json_dict),'application/json'),"file": ("policy",policy,'application/octet-stream')})
+        print(response)
+
+Transition = namedtuple('Transition','state','action','next_state','reward')
+
+class ReplayMemory(object):
+
+    def __init__(self, capacity):
+        self.memory = deque([],maxlen=capacity)
+    
+    def push(self, *args):
+        self.memory.append(Transition(*args))
+    
+    def sample(self,batch_size):
+        return random.sample(self.memory,batch_size)
+    
+    def __len__(self):
+        return len(self.memory)
+
+class SpheroEnv(gym.env):
+
+    def __init__(self,file):
+        super(SpheroEnv,self).__init__()
+        self.replay = open(file,'r').readlines()
+        ## Action space: discrete/continuous
+        setting = self.replay[0].split()
+        if setting[0] == 'discrete':
+            self.action_space = spaces.Discrete(setting[1])
+            self.observation_space = spaces.Box(low=setting[1],high=setting[2],shape=literal_eval(setting[3]),dtype=int)
+        else:
+            self.action_space = spaces.Box(low=setting[1],high=setting[2],shape=literal_eval(setting[3]),dtype=float)
+            self.observation_space = spaces.Box(low=setting[4],high=setting[5],shape=literal_eval(setting[6]),dtype=float)
+        
+        self.t = 1
+    
+    def step(self,action):
+        observation, action, reward, done = self.step_parse()
+        return observation, reward, done, []
+    
+    def reset(self):
+        s = np.asarray(literal_eval(self.init_state()))
+        return s
+
+    def step_parse(self):
+        item = self.replay[self.t].split()
+        self.t += 1
+        # s_, a, r, done
+        return item[0], item[1], item[2], item[3]
+
+    def init_state(self):
+        init_s = self.replay[self.t]
+        self.t += 1
+        return init_s
+
+
+class CustomEnv(gym.Env):
+    metadata = {'render.modes': ['human']}
+    goal = np.array([50.0,50.0],dtype=float)
+    buffer = []
+
+    """
+    params:
+    env_size, int or array-like
+    start, array-like
+    goal, array-like
+    action_space, array-like
+
+    """
+    def __init__(self):
+        super(CustomEnv,self).__init__()
+        # Define action and observation space
+        # They must be gym.spaces objects
+        # Example when using discrete actions:
+        self.action_space = spaces.Discrete(3)
+        self.observation_space = spaces.Box(low=0,high=50,shape=(2,),dtype=int)
+        self.state = np.array([0,0])
+        self.degree = 45
+
+    # def step(self,action):
+    #     # send request to the robot edge
+    #     observation = self.state_transit(action,1)
+    #     reward,done = self.reward()
+    #     print("reward ", reward)
+    #     info = {}
+    #     return observation, reward, done, info
+
+    def step(self, action):
+        if bool(self.buffer) == False:
+            print("start reading")
+            with open('test.txt','r') as lines:
+                for line in lines:
+                    self.buffer.append(line)
+        
+        observation = self.parse_coordinate(self.buffer.pop(0))
+        reward,done = self.reward()
+        # info = np.array2string(observation) + "," + str(reward)
+        info = dict()
+
+        return observation, reward, done, info
+
+
+
+    def reset(self):
+        self.state = np.array([0,0])
+        self.degree = 45
+        return self.state
+
+    # def render(self, mode='human'):
+
+
+    # def close(self):
+
+    
+    def reward(self):
+        reward = -self.calc_dist(self.state,self.goal)
+        if np.array_equal(self.state,self.goal):
+            reward = 1
+            done = True
+        else:
+            done = False
+        return reward,done
+
+    def parse_coordinate(self,line):
+        l = line.split(',')
+        output = []
+        for c in l:
+            output.append(int(c))
+        return np.array(output)
+
+    
+    def calc_dist(self,start,end):
+        return np.sqrt((end[0] - start[0])**2 + (end[1] - start[1])**2)
+        
+    def state_transit(self,action,dist):
+        # angel 0-45 y = cos, x = sin. angel 45-90 y = sin, x = cos
+        # turn left
+        if action == 0:
+            if self.degree == 0:
+                self.degree = 359
+            else:
+                self.degree -= 1
+        # turn right
+        elif action == 2:
+            if self.degree == 359:
+                self.degree = 0
+            else:
+                self.degree += 1
+        
+        #print("action: ", action)
+        #print("state: ", self.state)
+        if self.degree < 90:
+            if self.degree % 90 < 45:
+                self.state[0] += np.sin(np.radians(self.degree)) * dist
+                self.state[1] += np.cos(np.radians(self.degree)) * dist
+            else:
+                self.state[0] += np.cos(np.radians(self.degree)) * dist
+                self.state[1] += np.sin(np.radians(self.degree)) * dist
+        elif self.degree < 180:
+            if self.degree % 90 < 45:
+                self.state[0] += np.sin(np.radians(self.degree)) * dist
+                self.state[1] -= np.cos(np.radians(self.degree)) * dist
+            else:
+                self.state[0] += np.cos(np.radians(self.degree)) * dist
+                self.state[1] -= np.sin(np.radians(self.degree)) * dist
+        elif self.degree < 270:
+            if self.degree % 90 < 45:
+                self.state[0] -= np.sin(np.radians(self.degree)) * dist
+                self.state[1] -= np.cos(np.radians(self.degree)) * dist
+            else:
+                self.state[0] -= np.cos(np.radians(self.degree)) * dist
+                self.state[1] -= np.sin(np.radians(self.degree)) * dist
+        else:
+            if self.degree % 90 < 45:
+                self.state[0] -= np.sin(np.radians(self.degree)) * dist
+                self.state[1] += np.cos(np.radians(self.degree)) * dist
+            else:
+                self.state[0] -= np.cos(np.radians(self.degree)) * dist
+                self.state[1] += np.sin(np.radians(self.degree)) * dist
+
+        print("state_: ", self.state)
+        return self.state
+
+    
+
+# env = CustomEnv()
+# env.state_transit(1,1)
+# env = gym.make("CartPole-v1")
+# check_env(env,warn=True)
+
+# model = A2C('MlpPolicy',env).learn(total_timesteps=5)
+# model.save('saved_model')
+# connector = Connector()
+# connector.edge_update()
+# env.close()
+
+# observation = env.reset()
+# for _ in range(1000):
+#     action,_ = model.predict(observation)
+#     observation, reward, done, info = env.step(action)
+
+#     if done:
+#         observation = env.reset()
+# env.close()
+
+client = KafkaClient()
+client.consume_msg()

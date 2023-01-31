@@ -1,0 +1,139 @@
+from collections import deque, namedtuple
+import random
+
+import numpy as np
+import torch as torch
+from torch import nn
+
+import gym
+from gym import spaces
+import stable_baselines3
+from stable_baselines3 import A2C
+
+
+class EnsembleSAC():
+
+    def __init__(self,replay_buffer, env, num_agent, input_dim, output_dim, tempature, gamma):
+        self.buffer = replay_buffer
+        self.env = env
+        self.tempature = tempature
+        self.gamma = gamma
+        self.num_agent = num_agent
+        self.qt_sim = []
+        self.qt_real = []
+        self.qp_sim = []
+        self.qp_real = []
+        for i in num_agent:
+            self.qt_sim.append(Feedforward(input_dim, output_dim))
+            self.qt_real.append(Feedforward(input_dim, output_dim))
+            self.qp_sim.append(Feedforward(input_dim,output_dim))
+            self.qp_real.append(Feedforward(input_dim,output_dim))
+
+    
+    def loss(self, transition, agent_i):
+        weight = self.weight(transition)
+
+        # sim q function loss
+        q = self.qt_sim[agent_i]
+        p = self.qp_sim[agent_i]
+        target = self.gamma*p.forward([0][1]) + transition[0][0][1] ## target + reward
+        loss_sim =  weight*torch.pow(q.forward([0][0]) - target, 2)
+
+        # real q function loss
+        q = self.qt_real[agent_i]
+        p = self.qp_real[agent_i]
+        target = self.gamma*p.forward([1][1]) + transition[1][0][1] 
+        loss_real = weight*torch.pow(q.forward([1][0]) - target, 2)
+
+        return loss_sim, loss_real
+
+        
+    
+    def weight(self,transition):
+        # transition dimension 0: sim, real. Dimension 1: t, t_. Dimension 2: s, r, a
+        sum_sim = 0
+        sum_real = 0
+        for i in range(self.num_agent):
+            sum_real += self.qtargetList_real[i].forward(transition[1][1])
+            sum_sim += self.qtargetList_sim[i].forward(transition[0][1])
+        mean_sim = sum/self.num_agent
+        mean_real = sum/self.num_agent
+
+        std_sum = 0
+        for i in range(self.num_agent):
+            #cross std# std_sum += (self.qtargetList_sim[i].forward(transition[0][1]) - mean_sim) * (self.qtargetList_real[i].forward(transition[1][1]) - mean_real)
+            std_sum += torch.pow(self.qtargetList_sim[i].forward(transition[0][1] - mean_sim), 2)
+        std = pow(std_sum/len(self.qtargetList), 0.5)
+
+        sigmoid = 1 / (1 + np.exp(-std * self.tempature))
+        df = sigmoid * (1-sigmoid)
+        return df + 0.5
+
+    def learn(self,learning_rate, iterations):
+        for i in range(iterations):
+            for j in range(self.num_agent):
+                optimizer = torch.optim.SGD(self.qp_sim[j].fc.parameters(),learning_rate)
+                sample = self.buffer
+                l_sim, l_real = self.loss()
+                l_sim.backward()
+                l_real.backward()
+                optimizer.step()
+                optimizer.zero_grad()
+        return
+
+    def set_replay_buffer(self, replay_buffer):
+        self.buffer = replay_buffer
+
+    def policy(self, alpha):
+        
+        return
+
+
+
+
+class Feedforward(nn.Module):
+
+    def __init__(self,input_dim, output_dim):
+        super(Feedforward).__init__()
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.fc = nn.Linear(input_dim, output_dim)
+        
+
+    def forward(self, x):
+        return self.fc(x)
+
+Transition = namedtuple('Transition','state', 'action', 'next_state', 'reward')
+
+class ReplayMemory(object):
+
+    def __init__(self, capacity):
+        self.memory = deque([],maxlen=capacity)
+    
+    def push(self, *args):
+        self.memory.append(Transition(*args))
+    
+    def sample(self,batch_size):
+        return random.sample(self.memory,batch_size)
+        
+    
+    def __len__(self):
+        return len(self.memory)
+
+env =  gym.make("CartPole-v1")
+ensemble = EnsembleSAC([],3,1)
+
+# Iteration
+for _ in range(1000):
+    # Select an index of policy
+    i = random.randrange(0,ensemble.num_agent)
+    # Initial environment
+    observation, info = env.reset(seed=43, return_info=True)
+
+    # Timestep
+    for _ in range(1000):
+        # N action sample
+        for q in ensemble.qp_real:
+             q.forward()
+
+
