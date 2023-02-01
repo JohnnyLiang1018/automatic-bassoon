@@ -15,6 +15,7 @@ class Server(object):
     def __init__(self):
         self.gym = VectorizedGym()
         self.num_ensemble = 2
+        print(self.gym.obs_i)
 
     def server_program(self):
         host = socket.gethostname()
